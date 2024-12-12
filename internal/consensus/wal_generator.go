@@ -81,7 +81,9 @@ func WALGenerateNBlocks(ctx context.Context, t *testing.T, logger log.Logger, wr
 
 	mempool := emptyMempool{}
 	evpool := sm.EmptyEvidencePool{}
-	blockExec := sm.NewBlockExecutor(stateStore, log.NewNopLogger(), proxyApp, mempool, evpool, blockStore, eventBus, sm.NopMetrics())
+	sidecar := emptySidecar{}
+	blockExec := sm.NewBlockExecutor(stateStore, log.NewNopLogger(), proxyApp, mempool, evpool, blockStore, eventBus, sm.NopMetrics(), sidecar)
+
 	consensusState, err := NewState(logger, cfg.Consensus, stateStore, blockExec, blockStore, mempool, evpool, eventBus, []trace.TracerProviderOption{})
 	if err != nil {
 		t.Fatal(err)

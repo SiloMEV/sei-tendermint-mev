@@ -13,6 +13,8 @@ import (
 const (
 	MempoolChannel = p2p.ChannelID(0x30)
 
+	SidecarChannel = byte(0x80)
+
 	// PeerCatchupSleepIntervalMS defines how much time to sleep if a peer is behind
 	PeerCatchupSleepIntervalMS = 100
 
@@ -22,6 +24,43 @@ const (
 
 	MaxActiveIDs = math.MaxUint16
 )
+
+// Sidecar is a dummy version of a mempool only gossipeed through
+// the SidecarChannel with the Sentinel
+type PriorityTxSidecar interface {
+	// AddTx takes in a transaction and adds to the sidecar, no checks
+	// given by CheckTx
+	AddTx(tx types.Tx, txInfo TxInfo) error
+	// ReapMaxTxs reaps up to max transactions from the mempool.
+	// If max is negative, there is no cap on the size of all returned
+	// transactions (~ all available transactions).
+	ReapMaxTxs() []*MempoolTx
+	// Lock locks the mempool. The consensus must be able to hold lock to safely update.
+	Lock()
+	// Flush removes all transactions from the mempool and cache
+	Flush()
+	// Unlock unlocks the mempool.
+	Unlock()
+	// Update informs the sidecar that the given txs were reaped and can be discarded.
+	// NOTE: this should be called *after* block is committed by consensus.
+	// NOTE: Lock/Unlock must be managed by caller
+	Update(
+		blockHeight int64,
+		blockTxs types.Txs,
+		deliverTxResponses []*abci.ResponseDeliverTx,
+	) error
+	// TxsAvailable returns a channel which fires once for every height,
+	// and only when transactions are available in the mempool.
+	// NOTE: the returned channel may be nil if EnableTxsAvailable was not called.
+	TxsAvailable() <-chan struct{}
+	HeightForFiringAuction() int64
+	// EnableTxsAvailable initializes the TxsAvailable channel, ensuring it will
+	// trigger once every height when transactions are available.
+	// Size returns the number of transactions in the mempool.
+	Size() int
+	// TxsBytes returns the total size of all txs in the mempool.
+	TxsBytes() int64
+}
 
 //go:generate ../../scripts/mockery_generate.sh Mempool
 
@@ -48,7 +87,7 @@ type Mempool interface {
 	//
 	// If both maxes are negative, there is no cap on the size of all returned
 	// transactions (~ all available transactions).
-	ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs
+	ReapMaxBytesMaxGas(maxBytes, maxGas int64, sidecarTxs []*MempoolTx) types.Txs
 
 	// ReapMaxTxs reaps up to max transactions from the mempool. If max is
 	// negative, there is no cap on the size of all returned transactions

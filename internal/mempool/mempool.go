@@ -431,7 +431,11 @@ func (txmp *TxMempool) Flush() {
 // NOTE:
 //   - Transactions returned are not removed from the mempool transaction
 //     store or indexes.
-func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
+
+// TODO: you can lose atomicity for a bundle from the sidecar that's "cut off" because of
+// max size or max gas. Not a problem now with one bundle, but in the future encode this requirement
+
+func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64, sidecarTxs []*MempoolTx) types.Txs {
 	txmp.mtx.Lock()
 	defer txmp.mtx.Unlock()
 
@@ -441,11 +445,42 @@ func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
 	)
 
 	var txs []types.Tx
+
+	// Pull the transactions from sidecar for this height
+	// TODO: decide here to recheck transactions, or when we should do this
+	// TODO: should we do this here? or at finalizeCommit?
+
+	var sidecarTxsMap sync.Map
+	for _, scMemTx := range sidecarTxs {
+		fmt.Println("REAPING SIDECAR TX")
+		fmt.Println(scMemTx.tx)
+		dataSize := types.ComputeProtoSizeForTxs(append(txs, scMemTx.tx))
+		// Check total size requirement
+		if maxBytes > -1 && dataSize > maxBytes {
+			return txs
+		}
+		newTotalGas := totalGas + scMemTx.gasWanted
+		if maxGas > -1 && newTotalGas > maxGas {
+			return txs
+		}
+		totalGas = newTotalGas
+		txs = append(txs, scMemTx.tx)
+		sidecarTxsMap.Store(TxKey(scMemTx.tx), true)
+	}
+
 	if uint64(txmp.NumTxsNotPending()) < txmp.config.TxNotifyThreshold {
 		// do not reap anything if threshold is not met
 		return txs
 	}
 	txmp.priorityIndex.ForEachTx(func(wtx *WrappedTx) bool {
+
+		if _, ok := sidecarTxsMap.Load(TxKey(wTx.tx)); ok {
+			// SKIP THIS TRANSACTION, ALREADY SEEN IN SENTINEL
+			fmt.Println("SKIP SIDECAR TX IN REAP, skipping in mempool:")
+			fmt.Println(memTx.tx)
+			continue
+		}
+
 		size := types.ComputeProtoSizeForTxs([]types.Tx{wtx.tx})
 
 		if maxBytes > -1 && totalSize+size > maxBytes {

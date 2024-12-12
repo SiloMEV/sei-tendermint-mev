@@ -14,6 +14,7 @@ import (
 
 // TxInfo are parameters that get passed when attempting to add a tx to the
 // mempool.
+// TODO: does adding order here ruin consensus somehow?
 type TxInfo struct {
 	// SenderID is the internal peer ID used in the mempool to identify the
 	// sender, storing two bytes with each transaction instead of 20 bytes for
@@ -22,6 +23,48 @@ type TxInfo struct {
 
 	// SenderNodeID is the actual types.NodeID of the sender.
 	SenderNodeID types.NodeID
+
+	// ordering for sidecar tx
+	BundleId int64
+	// auction height desired for tx
+	DesiredHeight int64
+	// order desired within bundle (i.e. per BundleID)
+	BundleOrder int64
+	// total size of bundle
+	BundleSize int64
+}
+
+// MempoolTx is a transaction that successfully ran
+type MempoolTx struct {
+	height    int64    // height of state that this tx had been validated against
+	gasWanted int64    // amount of gas this tx states it will require
+	tx        types.Tx //
+	// ids of peers who've sent us this tx (as a map for quick lookups).
+	// senders: PeerID -> bool
+	senders sync.Map
+}
+
+// MempoolTx is a transaction that successfully ran
+type SidecarTx struct {
+	desiredHeight int64    // height that this tx wants to be included in
+	bundleId      int64    // ordered id of bundle
+	bundleOrder   int64    // order of tx within bundle
+	bundleSize    int64    // total size of bundle
+	gasWanted     int64    // amount of gas this tx states it will require
+	tx            types.Tx // tx bytes
+	// ids of peers who've sent us this tx (as a map for quick lookups).
+	// senders: PeerID -> bool
+	senders sync.Map
+}
+
+// Bundle stores information about a sidecar bundle
+type Bundle struct {
+	desiredHeight int64     // height that this bundle wants to be included in
+	bundleId      int64     // ordered id of bundle
+	currSize      int64     // total size of bundle
+	enforcedSize  int64     // total size of bundle
+	gasWanted     int64     // amount of gas this tx states it will require
+	orderedTxsMap *sync.Map // map from bundleOrder to *mempoolTx
 }
 
 // WrappedTx defines a wrapper around a raw transaction with additional metadata
