@@ -1,4 +1,4 @@
-# Tendermint
+# Tendermint Silo MEV
 
 ![banner](docs/tendermint-core-image.jpg)
 

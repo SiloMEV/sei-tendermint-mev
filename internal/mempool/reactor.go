@@ -34,6 +34,8 @@ type Reactor struct {
 
 	peerEvents p2p.PeerEventSubscriber
 
+	sidecar *CListPriorityTxSidecar
+
 	// observePanic is a function for observing panics that were recovered in methods on
 	// Reactor. observePanic is called with the recovered value.
 	observePanic func(interface{})
@@ -51,6 +53,7 @@ func NewReactor(
 	cfg *config.MempoolConfig,
 	txmp *TxMempool,
 	peerEvents p2p.PeerEventSubscriber,
+	sidecar *CListPriorityTxSidecar
 ) *Reactor {
 	r := &Reactor{
 		logger:       logger,
@@ -61,6 +64,7 @@ func NewReactor(
 		peerRoutines: make(map[types.NodeID]context.CancelFunc),
 		observePanic: defaultObservePanic,
 		readyToStart: make(chan struct{}, 1),
+		sidecar: sidecar,
 	}
 
 	r.BaseService = *service.NewBaseService(logger, "Mempool", r)
@@ -88,13 +92,20 @@ func GetChannelDescriptor(cfg *config.MempoolConfig) *p2p.ChannelDescriptor {
 	}
 
 	return &p2p.ChannelDescriptor{
-		ID:                  MempoolChannel,
-		MessageType:         new(protomem.Message),
-		Priority:            5,
-		RecvMessageCapacity: batchMsg.Size(),
-		RecvBufferCapacity:  128,
-		Name:                "mempool",
+		{
+			ID:                  MempoolChannel,
+			MessageType:         new(protomem.Message),
+			Priority:            5,
+			RecvMessageCapacity: batchMsg.Size(),
+			RecvBufferCapacity:  128,
+			Name:                "mempool",
+		}, {
+			ID:                  SidecarChannel,
+			Priority:            5,
+			RecvMessageCapacity: batchMsg.Size(),
+		},
 	}
+	
 }
 
 // OnStart starts separate go routines for each p2p Channel and listens for
@@ -119,15 +130,14 @@ func (r *Reactor) OnStart(ctx context.Context) error {
 // blocking until they all exit.
 func (r *Reactor) OnStop() {}
 
-// handleMempoolMessage handles envelopes sent from peers on the MempoolChannel.
-// For every tx in the message, we execute CheckTx. It returns an error if an
-// empty set of txs are sent in an envelope or if we receive an unexpected
-// message type.
+// handleMempoolMessage handles envelopes sent from peers on the MempoolChannel and SidecarChannel.
+// For every tx in the message, we execute CheckTx or AddTx based on the channel.
+// It returns an error if an empty set of txs are sent in an envelope or if we receive an unexpected message type.
 func (r *Reactor) handleMempoolMessage(ctx context.Context, envelope *p2p.Envelope) error {
 	logger := r.logger.With("peer", envelope.From)
 
 	switch msg := envelope.Message.(type) {
-	case *protomem.Txs:
+	case *protomem.Txs: // Handle MempoolChannel messages
 		protoTxs := msg.GetTxs()
 		if len(protoTxs) == 0 {
 			return errors.New("empty txs received from peer")
@@ -141,24 +151,53 @@ func (r *Reactor) handleMempoolMessage(ctx context.Context, envelope *p2p.Envelo
 		for _, tx := range protoTxs {
 			if err := r.mempool.CheckTx(ctx, types.Tx(tx), nil, txInfo); err != nil {
 				if errors.Is(err, types.ErrTxInCache) {
-					// if the tx is in the cache,
-					// then we've been gossiped a
-					// Tx that we've already
-					// got. Gossip should be
-					// smarter, but it's not a
-					// problem.
+					// Already cached, no further action needed
 					continue
 				}
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					// Do not propagate context
-					// cancellation errors, but do
-					// not continue to check
-					// transactions from this
-					// message if we are shutting down.
+					// Ignore cancellation errors but stop further processing for this message
 					return nil
 				}
 
 				logger.Debug("checktx failed for tx",
+					"tx", fmt.Sprintf("%X", types.Tx(tx).Hash()),
+					"err", err)
+			}
+		}
+
+	case *protomem.BundleTxs: // Handle SidecarChannel messages
+		protoTxs := msg.GetTxs()
+		if len(protoTxs) == 0 {
+			return errors.New("empty bundle txs received from peer")
+		}
+
+		txInfo := TxInfo{
+			SenderID:      r.ids.GetForPeer(envelope.From),
+			DesiredHeight: msg.GetDesiredHeight(),
+			BundleId:      msg.GetBundleId(),
+			BundleOrder:   msg.GetBundleOrder(),
+			BundleSize:    msg.GetBundleSize(),
+		}
+		if len(envelope.From) != 0 {
+			txInfo.SenderNodeID = envelope.From
+		}
+
+		for _, tx := range protoTxs {
+			logger.Debug("received sidecar tx",
+				"desiredHeight", txInfo.DesiredHeight,
+				"bundleId", txInfo.BundleId,
+				"bundleOrder", txInfo.BundleOrder,
+				"bundleSize", txInfo.BundleSize,
+				"tx", fmt.Sprintf("%X", types.Tx(tx).Hash()))
+
+			if err := r.sidecar.AddTx(types.Tx(tx), txInfo); err != nil {
+				if errors.Is(err, types.ErrTxInCache) {
+					// Already cached, no further action needed
+					logger.Debug("sidecartx already exists in cache",
+						"tx", fmt.Sprintf("%X", types.Tx(tx).Hash()))
+					continue
+				}
+				logger.Info("could not add sidecar tx",
 					"tx", fmt.Sprintf("%X", types.Tx(tx).Hash()),
 					"err", err)
 			}
@@ -175,6 +214,7 @@ func (r *Reactor) handleMempoolMessage(ctx context.Context, envelope *p2p.Envelo
 // It will handle errors and any possible panics gracefully. A caller can handle
 // any error returned by sending a PeerError on the respective channel.
 func (r *Reactor) handleMessage(ctx context.Context, envelope *p2p.Envelope) (err error) {
+	// I actually think its better to put it in here as another case.
 	defer func() {
 		if e := recover(); e != nil {
 			r.observePanic(e)
